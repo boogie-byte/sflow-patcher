@@ -2,7 +2,7 @@ package main
 
 import (
 	"encoding/binary"
-	"net"
+	"runtime/debug"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -52,20 +52,12 @@ func (c *copier) dstOffset() int {
 	return c.dstOff
 }
 
-// reads the incoming packet payload into the source slice,
-// resets both source and destiantion offsets
-func (c *copier) readPacket(conn net.PacketConn) error {
-	n, addr, err := conn.ReadFrom(c.src)
-	if err != nil {
-		return err
-	}
-	log.Debugf("Received %d bytes from %s", n, addr)
-
+// resets both source and destiantion offsets,
+// sets source length to n
+func (c *copier) reset(n int) {
 	c.srcLen = n
 	c.srcOff = 0
 	c.dstOff = 0
-
-	return nil
 }
 
 // pads destination with n zeros
@@ -155,4 +147,20 @@ func (c *copier) readUint16() uint16 {
 // their big-endian uint32 value
 func (c *copier) readUint32() uint32 {
 	return binary.BigEndian.Uint32(c.readBytes(4))
+}
+
+// processes sflow datagram from the source slice
+// into the destination slice
+func (c *copier) process() (data []byte) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Warnf("Failed to parse datagram: %s", r)
+			log.Debugf("panic: %s\n%s", r, string(debug.Stack()))
+			data = c.sourceBytes()
+		} else {
+			data = c.processedBytes()
+		}
+	}()
+	processDatagram(c)
+	return
 }
