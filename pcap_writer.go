@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net"
 
 	"github.com/google/gopacket"
@@ -9,13 +10,12 @@ import (
 )
 
 type pcapWriter struct {
-	handle  *pcap.Handle
-	srcMAC  net.HardwareAddr
-	dstMAC  net.HardwareAddr
-	dstAddr *net.UDPAddr
+	handle *pcap.Handle
+	srcMAC net.HardwareAddr
+	dstMAC net.HardwareAddr
 }
 
-func newPcapWriter(ifName string, dstMAC net.HardwareAddr, dstAddr *net.UDPAddr) (*pcapWriter, error) {
+func newPcapWriter(ifName string, dstMAC net.HardwareAddr) (*pcapWriter, error) {
 	iface, err := net.InterfaceByName(ifName)
 	if err != nil {
 		return nil, err
@@ -27,10 +27,9 @@ func newPcapWriter(ifName string, dstMAC net.HardwareAddr, dstAddr *net.UDPAddr)
 	}
 
 	return &pcapWriter{
-		handle:  handle,
-		srcMAC:  iface.HardwareAddr,
-		dstMAC:  dstMAC,
-		dstAddr: dstAddr,
+		handle: handle,
+		srcMAC: iface.HardwareAddr,
+		dstMAC: dstMAC,
 	}, nil
 }
 
@@ -39,6 +38,11 @@ func (w *pcapWriter) close() {
 }
 
 func (w *pcapWriter) write(srcAddr *net.UDPAddr, data []byte) error {
+	dstAddr := routeMapLookup(srcAddr.IP)
+	if dstAddr == nil {
+		return fmt.Errorf("No collector configured for agent %s", srcAddr.IP.String())
+	}
+
 	buf := gopacket.NewSerializeBuffer()
 	serializeOpts := gopacket.SerializeOptions{
 		FixLengths:       true,
@@ -52,14 +56,14 @@ func (w *pcapWriter) write(srcAddr *net.UDPAddr, data []byte) error {
 	}
 	ip := &layers.IPv4{
 		SrcIP:    srcAddr.IP,
-		DstIP:    w.dstAddr.IP,
+		DstIP:    dstAddr.IP,
 		Protocol: layers.IPProtocolUDP,
 		Version:  4,
 		TTL:      32,
 	}
 	udp := &layers.UDP{
 		SrcPort: layers.UDPPort(srcAddr.Port),
-		DstPort: layers.UDPPort(w.dstAddr.Port),
+		DstPort: layers.UDPPort(dstAddr.Port),
 	}
 	udp.SetNetworkLayerForChecksum(ip)
 

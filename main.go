@@ -11,8 +11,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var flagRouteMapPath string
 var flagListenAddr string
-var flagUpstreamAddr string
 var flagOutIf string
 var flagDstMAC string
 var flagNumWorkers int
@@ -25,8 +25,9 @@ var rootCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.PersistentFlags().StringVarP(&flagUpstreamAddr, "upstream", "u", "", "upstream address:port")
-	rootCmd.MarkPersistentFlagRequired("upstream")
+	rootCmd.PersistentFlags().StringVarP(&flagRouteMapPath, "route-map", "r", "", "path to the collector route map file")
+	rootCmd.MarkPersistentFlagRequired("route-map")
+
 	rootCmd.PersistentFlags().StringVarP(&flagOutIf, "out-if", "i", "", "outgoing interface")
 	rootCmd.MarkPersistentFlagRequired("out-if")
 	rootCmd.PersistentFlags().StringVarP(&flagDstMAC, "dst-mac", "m", "", "destination MAC address")
@@ -62,12 +63,24 @@ func runWorker(conn *net.UDPConn, writer *pcapWriter, wg *sync.WaitGroup) {
 	wg.Done()
 }
 
+// Reload route map on SIGHUP, stop UDP server on SIGINT/SIGTERM
 func signalHandler(server net.PacketConn) {
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-	sig := <-sigCh
-	log.Info(sig)
-	server.Close()
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	for {
+		sig := <-sigCh
+		switch sig {
+		case syscall.SIGHUP:
+			log.Info("SIGHUP received, reloading route map")
+			if err := routeMapReload(); err != nil {
+				log.Error(err)
+			}
+		case os.Interrupt, syscall.SIGTERM:
+			log.Info(sig)
+			server.Close()
+			return
+		}
+	}
 }
 
 func rootCmdHandler(_ *cobra.Command, _ []string) {
@@ -76,17 +89,17 @@ func rootCmdHandler(_ *cobra.Command, _ []string) {
 		log.Debug("Debug logging enabled")
 	}
 
+	if err := routeMapReload(); err != nil {
+		log.Fatal(err)
+	}
+
 	// Create an outgoing interface handle for spoofing
 	dstMAC, err := net.ParseMAC(flagDstMAC)
 	if err != nil {
 		log.Fatal(err)
 	}
-	dstAddr, err := net.ResolveUDPAddr("udp4", flagUpstreamAddr)
-	if err != nil {
-		log.Fatal(err)
-	}
 	log.Infof("Setting %s as outgoing interface", flagOutIf)
-	writer, err := newPcapWriter(flagOutIf, dstMAC, dstAddr)
+	writer, err := newPcapWriter(flagOutIf, dstMAC)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -104,7 +117,6 @@ func rootCmdHandler(_ *cobra.Command, _ []string) {
 	}
 	defer conn.Close()
 
-	// Stop UDP server on SIGINT/SIGTERM
 	go signalHandler(conn)
 
 	log.Infof("Starting %d workers", flagNumWorkers)
